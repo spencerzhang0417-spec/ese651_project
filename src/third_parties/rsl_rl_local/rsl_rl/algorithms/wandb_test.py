@@ -13,7 +13,7 @@ run = wandb.init(
         "learning_rate": 0.02,
         "architecture": "CNN",
         "dataset": "CIFAR-100",
-        "epochs": 10,
+        "epochs": 100,
     },
 )
 
