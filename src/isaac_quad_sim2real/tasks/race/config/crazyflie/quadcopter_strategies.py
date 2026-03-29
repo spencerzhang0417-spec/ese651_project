@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
-from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi, matrix_from_quat
+from isaaclab.utils.math import subtract_frame_transforms, quat_from_euler_xyz, euler_xyz_from_quat, wrap_to_pi
 
 if TYPE_CHECKING:
     from .quadcopter_env import QuadcopterEnv
@@ -104,12 +104,28 @@ class DefaultQuadcopterStrategy:
         self.env._last_distance_to_goal = distance_to_goal.clone()
         progress = torch.clamp(delta_distance, -1.0, 1.0)
 
-        # --- Speed toward current gate ---
+        # --- Speed toward current gate (split into approach and exit phases) ---
         direction_to_gate = self.env._desired_pos_w - self.env._robot.data.root_link_pos_w
-        direction_to_gate = direction_to_gate / (torch.linalg.norm(direction_to_gate, dim=1, keepdim=True) + 1e-8)
+        dist_to_gate = torch.linalg.norm(direction_to_gate, dim=1, keepdim=True)
+        direction_to_gate = direction_to_gate / (dist_to_gate + 1e-8)
         vel_world = self.env._robot.data.root_com_lin_vel_w
         speed_toward_gate = torch.sum(vel_world * direction_to_gate, dim=1)
-        speed_reward = torch.clamp(speed_toward_gate, 0.0, 5.0) / 5.0
+        dist_scalar = dist_to_gate.squeeze(1)
+
+        # Approach: reward high speed when far from gate (>2m)
+        approach_blend = torch.clamp((dist_scalar - 1.0) / 1.0, 0.0, 1.0)
+        approach_speed = approach_blend * torch.clamp(speed_toward_gate, 0.0, 8.0) / 8.0
+
+        # Exit: reward moderate, controlled speed when close to gate (<2m)
+        exit_blend = 1.0 - approach_blend
+        exit_speed = exit_blend * torch.clamp(speed_toward_gate, 0.0, 3.0) / 3.0
+
+        # --- Gate proximity: reward being close to the gate center ---
+        gate_proximity = torch.clamp(1.0 - dist_scalar / 3.0, 0.0, 1.0)
+
+        # --- Smooth control: penalize jerky action changes ---
+        action_diff = self.env._actions - self.env._previous_actions
+        action_rate = torch.sum(action_diff ** 2, dim=1)
 
         # --- Crash detection ---
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -123,7 +139,11 @@ class DefaultQuadcopterStrategy:
             rewards = {
                 "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
                 "gate_passed": gate_passed * self.env.rew['gate_passed_reward_scale'],
-                "speed_toward_gate": speed_reward * self.env.rew['speed_toward_gate_reward_scale'],
+                "approach_speed": approach_speed * self.env.rew['approach_speed_reward_scale'],
+                "exit_speed": exit_speed * self.env.rew['exit_speed_reward_scale'],
+                "gate_proximity": gate_proximity * self.env.rew['gate_proximity_reward_scale'],
+                "action_rate": action_rate * self.env.rew['action_rate_reward_scale'],
+                "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)

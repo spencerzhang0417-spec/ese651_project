@@ -17,6 +17,7 @@ else:
     print(f"[WARNING] Local rsl_rl not found at: {local_rsl_path}")
 
 import argparse
+import csv
 
 from isaaclab.app import AppLauncher
 
@@ -32,6 +33,13 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--follow_robot", type=int, default=-1, help="Follow robot index.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+parser.add_argument(
+    "--play_log",
+    type=str,
+    default=None,
+    help="CSV path for per-step play metrics. Use 'auto' for default next to checkpoint. "
+    "If omitted but --video is set, writes to videos/play/play_metrics.csv.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -139,6 +147,51 @@ def main():
         ppo_runner.alg.actor_critic, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
     )
 
+    # Per-step CSV log (for analyzing policy behavior vs video)
+    base = env.unwrapped
+    dt_step = base.cfg.sim.dt * base.cfg.decimation
+    if args_cli.play_log == "auto":
+        play_log_path = (
+            os.path.join(log_dir, "videos", "play", "play_metrics.csv")
+            if args_cli.video
+            else os.path.join(log_dir, "play_metrics.csv")
+        )
+    elif args_cli.play_log:
+        play_log_path = args_cli.play_log
+    elif args_cli.video:
+        play_log_path = os.path.join(log_dir, "videos", "play", "play_metrics.csv")
+    else:
+        play_log_path = None
+
+    play_csv_file = None
+    play_csv_writer = None
+    if play_log_path:
+        os.makedirs(os.path.dirname(play_log_path) or ".", exist_ok=True)
+        play_csv_file = open(play_log_path, "w", newline="")
+        play_csv_writer = csv.writer(play_csv_file)
+        play_csv_writer.writerow(
+            [
+                "step",
+                "time_s",
+                "pos_x",
+                "pos_y",
+                "pos_z",
+                "vel_x",
+                "vel_y",
+                "vel_z",
+                "speed",
+                "gate_idx",
+                "n_gates_passed",
+                "x_gate_frame",
+                "reward",
+                "terminated",
+                "truncated",
+                "abs_pitch_rate",
+                "checkpoint",
+            ]
+        )
+        print(f"[INFO] Writing play metrics to: {play_log_path}")
+
     # reset environment
     obs = env.get_observations()
     # Extract tensor from TensorDict for policy
@@ -156,11 +209,49 @@ def main():
             # Extract tensor from TensorDict for policy
             if hasattr(obs, "get"):  # Check if it's a TensorDict
                 obs = obs["policy"]  # Extract the policy observation
+        if play_csv_writer is not None:
+            pos = base._robot.data.root_link_pos_w[0].cpu()
+            vel = base._robot.data.root_com_lin_vel_w[0].cpu()
+            spd = float(torch.linalg.norm(vel))
+            pr = float(torch.abs(base._robot.data.root_ang_vel_b[0, 1].cpu()))
+            xgf = float(base._pose_drone_wrt_gate[0, 0].cpu())
+            gidx = int(base._idx_wp[0].item())
+            ng = int(base._n_gates_passed[0].item())
+            rew = float(rewards[0].item())
+            term = bool(base.reset_terminated[0].item())
+            trunc = bool(base.reset_time_outs[0].item())
+            t_s = timestep * dt_step
+            play_csv_writer.writerow(
+                [
+                    timestep,
+                    f"{t_s:.4f}",
+                    f"{pos[0].item():.4f}",
+                    f"{pos[1].item():.4f}",
+                    f"{pos[2].item():.4f}",
+                    f"{vel[0].item():.4f}",
+                    f"{vel[1].item():.4f}",
+                    f"{vel[2].item():.4f}",
+                    f"{spd:.4f}",
+                    gidx,
+                    ng,
+                    f"{xgf:.4f}",
+                    f"{rew:.6f}",
+                    int(term),
+                    int(trunc),
+                    f"{pr:.4f}",
+                    os.path.basename(resume_path),
+                ]
+            )
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        elif play_csv_writer is not None:
+            timestep += 1
+
+    if play_csv_file is not None:
+        play_csv_file.close()
 
     # close the simulator
     env.close()
