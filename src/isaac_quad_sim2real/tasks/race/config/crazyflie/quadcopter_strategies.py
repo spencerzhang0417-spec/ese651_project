@@ -127,9 +127,6 @@ class DefaultQuadcopterStrategy:
         # --- Gate proximity: reward being close to the gate center ---
         gate_proximity = torch.clamp(1.0 - dist_scalar / 3.0, 0.0, 1.0)
 
-        # # --- Smooth control: penalize jerky action changes ---
-        # action_diff = self.env._actions - self.env._previous_actions
-        # action_rate = torch.sum(action_diff ** 2, dim=1)
 
         # --- Crash detection ---
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -147,7 +144,6 @@ class DefaultQuadcopterStrategy:
                 "approach_speed": approach_speed * self.env.rew['approach_speed_reward_scale'],
                 "exit_speed": exit_speed * self.env.rew['exit_speed_reward_scale'],
                 "gate_proximity": gate_proximity * self.env.rew['gate_proximity_reward_scale'],
-                # "action_rate": action_rate * self.env.rew['action_rate_reward_scale'],
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
                 "backward_cross": backward_penalty * self.env.rew['backward_cross_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
