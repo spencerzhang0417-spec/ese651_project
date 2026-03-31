@@ -127,6 +127,7 @@ class DefaultQuadcopterStrategy:
         # --- Gate proximity: reward being close to the gate center ---
         gate_proximity = torch.clamp(1.0 - dist_scalar / 3.0, 0.0, 1.0)
 
+        # Only active when targeting gate 2 or gate 3
 
         # --- Crash detection ---
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -146,6 +147,7 @@ class DefaultQuadcopterStrategy:
                 "gate_proximity": gate_proximity * self.env.rew['gate_proximity_reward_scale'],
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
                 "backward_cross": backward_penalty * self.env.rew['backward_cross_reward_scale'],
+                "correct_approach": correct_approach * self.env.rew['correct_approach_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
