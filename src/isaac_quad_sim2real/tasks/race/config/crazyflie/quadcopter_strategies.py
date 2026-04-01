@@ -130,6 +130,19 @@ class DefaultQuadcopterStrategy:
         # Only active when targeting gate 2 or gate 3
         is_powerloop = ((self.env._idx_wp == 2) | (self.env._idx_wp == 3)).float()
 
+        # encourage approach diredction
+        gate_normals = self.env._normal_vectors[self.env._idx_wp]
+        vel_w = self.env._robot.data.root_com_lin_vel_w
+        vel_along_normal = torch.sum(vel_w * gate_normals, dim=1)
+        approach_correctness = torch.clamp(-vel_along_normal, 0.0, 6.0) / 6.0
+        near_gate = (dist_scalar < 2.0).float()
+        correct_approach = near_gate * approach_correctness * is_powerloop
+
+        # altitude shaping encourage loop (gate 3 only) ---
+        # heading_to_gate3 = (self.env._idx_wp == 3).float()
+        # drone_z = self.env._robot.data.root_link_pos_w[:, 2]
+        # altitude_bonus = heading_to_gate3 * torch.clamp((drone_z - 1.2) / 1.0, 0.0, 1.0)
+
         # --- Crash detection ---
         contact_forces = self.env._contact_sensor.data.net_forces_w
         crashed = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1).int()
