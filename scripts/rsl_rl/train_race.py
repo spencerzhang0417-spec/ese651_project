@@ -108,14 +108,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # TODO ----- START ----- Define rewards scales
     rewards = {
         'progress_goal_reward_scale': 10.0,
-        'gate_passed_reward_scale': 200.0,
-        'approach_speed_reward_scale': 4.0,
-        'exit_speed_reward_scale': 3.0,
+        'gate_passed_reward_scale': 150.0,
+        'approach_speed_reward_scale': 6.5,
+        'exit_speed_reward_scale': 5.5,
         'gate_proximity_reward_scale': 0.5,
-        'time_penalty_reward_scale': -0.5,
-        'crash_reward_scale': -2.0,
-        'death_cost': -50.0,
-        'backward_cross_reward_scale': -100.0,
+        'time_penalty_reward_scale': -2.0,
+        'crash_reward_scale': -6.0,
+        'death_cost': -200.0,
+        'backward_cross_reward_scale': -150.0,
+        # 'altitude_bonus_reward_scale': 7.0,
         'correct_approach_reward_scale': 5.0,
     }
     # TODO ----- END -----

@@ -128,6 +128,7 @@ class DefaultQuadcopterStrategy:
         gate_proximity = torch.clamp(1.0 - dist_scalar / 3.0, 0.0, 1.0)
 
         # Only active when targeting gate 2 or gate 3
+        is_powerloop = ((self.env._idx_wp == 2) | (self.env._idx_wp == 3)).float()
 
         # --- Crash detection ---
         contact_forces = self.env._contact_sensor.data.net_forces_w
@@ -148,6 +149,7 @@ class DefaultQuadcopterStrategy:
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
                 "backward_cross": backward_penalty * self.env.rew['backward_cross_reward_scale'],
                 "correct_approach": correct_approach * self.env.rew['correct_approach_reward_scale'],
+                # "altitude_bonus": altitude_bonus * self.env.rew['altitude_bonus_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
