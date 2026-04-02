@@ -42,10 +42,9 @@ class DefaultQuadcopterStrategy:
                 for key in keys
             }
 
-        # Powerloop gate constraint: drone must go around gate 3 (above or to one side)
+        # Powerloop gate constraint: drone must go left of gate 3
         self._powerloop_gate_idx = 3
         self.env._min_y_on_approach = torch.zeros(self.num_envs, device=self.device)
-        self.env._max_z_on_approach = torch.zeros(self.num_envs, device=self.device)
 
         # Rolling crash buffer: tracks contact over the last N steps for clean-pass detection
         self._crash_window = 10
@@ -92,21 +91,16 @@ class DefaultQuadcopterStrategy:
         wrong_direction = (self.env._prev_x_drone_wrt_gate < 0) & (x_gate >= 0) & close_to_center
         wrong_dir_penalty = wrong_direction.float()
 
-        # Track y/z extremes when on approach side of powerloop gate
+        # Track min y_gate when targeting powerloop gate (left-turn constraint)
         y_gate = self.env._pose_drone_wrt_gate[:, 1]
-        z_gate = self.env._pose_drone_wrt_gate[:, 2]
-        on_approach_side = x_gate > 0
         is_powerloop_gate = self.env._idx_wp == self._powerloop_gate_idx
-        track_mask = on_approach_side & is_powerloop_gate
+        track_mask = is_powerloop_gate
         self.env._min_y_on_approach = torch.where(
             track_mask, torch.min(self.env._min_y_on_approach, y_gate), self.env._min_y_on_approach
         )
-        self.env._max_z_on_approach = torch.where(
-            track_mask, torch.max(self.env._max_z_on_approach, z_gate), self.env._max_z_on_approach
-        )
 
-        # For powerloop gate: require drone went around (y < -0.5 or z > 0.5)
-        went_around = (self.env._min_y_on_approach < -0.5) | (self.env._max_z_on_approach > 0.5)
+        # For powerloop gate: require drone went left (y_gate < -0.5 in gate frame)
+        went_around = self.env._min_y_on_approach < -0.5
         powerloop_ok = torch.where(
             is_powerloop_gate, went_around, torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         )
@@ -139,7 +133,7 @@ class DefaultQuadcopterStrategy:
         self.env._last_distance_to_goal = distance_to_goal.clone()
         progress = torch.clamp(delta_distance, -1.0, 1.0)
 
-        # --- Speed toward current gate (split into approach and exit phases) ---
+        # --- Speed toward current gate (unified) ---
         direction_to_gate = self.env._desired_pos_w - self.env._robot.data.root_link_pos_w
         dist_to_gate = torch.linalg.norm(direction_to_gate, dim=1, keepdim=True)
         direction_to_gate = direction_to_gate / (dist_to_gate + 1e-8)
@@ -147,13 +141,12 @@ class DefaultQuadcopterStrategy:
         speed_toward_gate = torch.sum(vel_world * direction_to_gate, dim=1)
         dist_scalar = dist_to_gate.squeeze(1)
 
-        # Approach: reward high speed when far from gate (>2m)
-        approach_blend = torch.clamp((dist_scalar - 1.0) / 1.0, 0.0, 1.0)
-        approach_speed = approach_blend * torch.clamp(speed_toward_gate, 0.0, 8.0) / 8.0
+        speed_reward = torch.clamp(speed_toward_gate, 0.0, 10.0) / 10.0
 
-        # Exit: reward moderate, controlled speed when close to gate (<2m)
-        exit_blend = 1.0 - approach_blend
-        exit_speed = exit_blend * torch.clamp(speed_toward_gate, 0.0, 3.0) / 3.0
+        # Powerloop setup phase: targeting gate 3 but haven't gone left yet.
+        # Clamp progress to non-negative so the drone isn't penalized for arcing away.
+        powerloop_setup = is_powerloop_gate & ~went_around
+        progress = torch.where(powerloop_setup, torch.clamp(progress, min=0.0), progress)
 
         # --- Gate centering: one-time bonus at gate crossing based on how centered the drone is ---
         gate_centering = gate_passed * torch.clamp(1.0 - yz_dist / 0.5, 0.0, 1.0)
@@ -172,7 +165,7 @@ class DefaultQuadcopterStrategy:
 
         # Scale gate_passed: clean pass gets full reward, dirty pass (any crash in last 10 steps) gets half
         clean_pass = (self.env._recent_crash_count == 0).float()
-        gate_pass_scale = 0.5 + 0.5 * clean_pass  # 1.0 if clean, 0.5 if dirty
+        gate_pass_scale = 0.75 + 0.25 * clean_pass  # 1.0 if clean, 0.75 if dirty
         # TODO ----- END -----
 
         if self.cfg.is_train:
@@ -180,8 +173,7 @@ class DefaultQuadcopterStrategy:
             rewards = {
                 "progress_goal": progress * self.env.rew['progress_goal_reward_scale'],
                 "gate_passed": gate_passed * gate_pass_scale * self.env.rew['gate_passed_reward_scale'],
-                "approach_speed": approach_speed * self.env.rew['approach_speed_reward_scale'],
-                "exit_speed": exit_speed * self.env.rew['exit_speed_reward_scale'],
+                "approach_speed": speed_reward * self.env.rew['approach_speed_reward_scale'],
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
                 "gate_proximity": gate_centering * self.env.rew['gate_proximity_reward_scale'],
@@ -465,7 +457,6 @@ class DefaultQuadcopterStrategy:
 
         self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
         self.env._min_y_on_approach[env_ids] = 0.0
-        self.env._max_z_on_approach[env_ids] = 0.0
 
         self.env._crashed[env_ids] = 0
         self.env._crash_ring[env_ids] = 0
