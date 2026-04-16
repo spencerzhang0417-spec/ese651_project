@@ -13,7 +13,7 @@ class QuadcopterPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 3000
     save_interval = 50
-    experiment_name = "sim2real_part1"
+    experiment_name = "sim2real_part2"
     empirical_normalization = False
     wandb_project = "ese651_quadcopter_sim2real"  # Wandb project name for logging
     policy = RslRlPpoActorCriticCfg(

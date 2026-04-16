@@ -1,0 +1,107 @@
+Circle-track zero-shot: real-flight analysis + sim-vs-real comparison
+=====================================================================
+
+Run everything from the project root (/home/liyifei/ese651_project).
+Use python3.10 — that is the env with mcap / mcap-ros2-support installed.
+
+1) Decode each rosbag into diagnostics PNG + JSON
+-------------------------------------------------
+(Only needed the first time, or if a bag changes.)
+
+    python3.10 scripts/analyze_real_flight.py rosbags/group36_1       crazy_jirl_b2 --out outputs/real_analysis
+    python3.10 scripts/analyze_real_flight.py rosbags/group36_faster  crazy_jirl_b3 --out outputs/real_analysis
+
+Notes:
+- The slow bag uses namespace crazy_jirl_b2; the fast bag uses crazy_jirl_b3.
+- Optional: --t0 T0 --tf TF   (seconds relative to first odom sample)
+- Writes: outputs/real_analysis/<bag>_diagnostics.png and <bag>.json
+
+2) Sim-vs-real overlay (static PNG)
+-----------------------------------
+
+    python3.10 scripts/compare_sim_real.py --auto --out outputs/real_analysis/sim_vs_real.png
+
+--auto uses this mapping (bag_dir -> pt_dir under rosbags/):
+    group36_1       -> "first run"
+    group36_faster  -> "faster"
+
+Each .pt is md5-matched against logs/rsl_rl/sim2real_part1/<ts>/best_model.pt
+to find the sim rollout whose videos/play/play_metrics.csv is used as the
+sim baseline. Traces are time-aligned on the first gate-pass event.
+
+3) Same, with interactive 3D viewer
+-----------------------------------
+
+    python3.10 scripts/compare_sim_real.py --auto --out outputs/real_analysis/sim_vs_real.png --show-3d
+
+Opens a rotatable matplotlib 3D window (blocks until you close it) showing
+both trajectories, gates, gate-pass markers, and collision markers.
+
+4) Explicit pairing (one bag, specific .pt)
+-------------------------------------------
+
+    python3.10 scripts/compare_sim_real.py \
+        --pair rosbags/group36_faster=rosbags/faster/best_model.pt \
+        --out outputs/real_analysis/sim_vs_real_faster.png --show-3d
+
+You can repeat --pair for multiple bags. --pair and --auto can be combined.
+
+Outputs
+-------
+outputs/real_analysis/
+    group36_1_diagnostics.png       per-bag multi-panel figure
+    group36_1.json                  full trajectory + events + raw /observations
+    group36_faster_diagnostics.png
+    group36_faster.json
+    sim_vs_real.png                 XY / z(t) / speed(t) overlay
+
+Legend on overlay: sim = solid, real = dashed; green o = sim pass,
+green ^ = real pass, red x = collision. First gate-pass is t = 0 for both.
+
+5) Foxglove 3D replay with gates + sim overlay
+----------------------------------------------
+
+Emit a sidecar mcap containing the gates (as SceneUpdate LINE_LOOPs),
+the full sim trajectory (SceneUpdate LINE_STRIP), and an animated
+sim drone pose (PoseInFrame + FrameTransform per sim sample),
+timestamped in the real bag's epoch so both play on one time cursor:
+
+    python3.10 scripts/export_foxglove_overlay.py --auto --out-dir outputs/real_analysis
+
+Writes outputs/real_analysis/<bag_name>_overlay.mcap per pair.
+
+Open in Foxglove Studio:
+  File > Open local file... > select BOTH the real bag and the sidecar
+  (e.g. rosbags/group36_faster/group36_faster_0.mcap
+        and outputs/real_analysis/group36_faster_overlay.mcap)
+  — Foxglove merges them on the same timeline.
+
+Panels to add:
+  - 3D panel:
+      * Frame:           mocap (same as the real bag)
+      * Topics to show:  /gates, /sim/path (orange), /real/path (blue),
+                         /tf (real drone pose), /sim/tf (sim drone pose)
+      * /real/path and /sim/path are static full trajectories; /tf and
+        /sim/tf animate the drones along them as you scrub.
+  - Plot panel for z, speed, thrust: drag /<ns>/odom.pose.pose.position.z,
+    /ctbr_cmd.thrust_n, /ctbr_cmd.roll_rate, etc.
+  - Time slider at the bottom scrubs both real and sim together.
+
+Alignment notes:
+  Sim t=0 is shifted so its first-gate-pass aligns with the real bag's
+  first-gate-pass. See the printed align_offset. If you want an earlier
+  re-alignment (e.g. by takeoff), tweak align_offset in
+  scripts/export_foxglove_overlay.py.
+
+Troubleshooting
+---------------
+- "no /<ns>/odom messages found": wrong namespace; check the bag's
+  topics with:
+      python3.10 -c "from mcap_ros2.reader import read_ros2_messages; \
+          print({m.channel.topic for m in read_ros2_messages('<bag>.mcap')})"
+- "no sim run with md5 ...": that .pt isn't under logs/rsl_rl/sim2real_part1/.
+  Either re-run scripts/rsl_rl/play_race.py --video against that checkpoint,
+  or point --pair at a .pt whose run is on disk.
+- Collision thresholds (COLLISION_OPENING_HALF, COLLISION_MARGIN,
+  COLLISION_DEBOUNCE_S) are module constants at the top of
+  scripts/analyze_real_flight.py — tune there if needed.
