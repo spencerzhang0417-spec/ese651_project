@@ -78,9 +78,8 @@ class DefaultQuadcopterStrategy:
         close_to_center = yz_dist < 0.75
         gate_passed = (gate_crossed & close_to_center).float()
 
-        # backward gate passing penalty
-        backward_crossed = (self.env._prev_x_drone_wrt_gate < 0) & (x_gate >= 0) & (yz_dist < 0.75)
-        backward_penalty = backward_crossed.float()  # scale this in reward dict
+        # backward gate passing — stored for termination in _get_dones()
+        self.env._backward_crossed = (self.env._prev_x_drone_wrt_gate < 0) & (x_gate >= 0) & (yz_dist < 0.75)
 
         # bonus for passing close to gate center
         clean_pass = gate_passed * (yz_dist < 0.4).float()
@@ -153,7 +152,6 @@ class DefaultQuadcopterStrategy:
                 # "gate_proximity": gate_proximity * self.env.rew['gate_proximity_reward_scale'],
                 "action_rate": action_rate * self.env.rew['action_rate_reward_scale'],
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
-                "backward_cross": backward_penalty * self.env.rew['backward_cross_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -433,3 +431,4 @@ class DefaultQuadcopterStrategy:
         self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
 
         self.env._crashed[env_ids] = 0
+        self.env._backward_crossed[env_ids] = False

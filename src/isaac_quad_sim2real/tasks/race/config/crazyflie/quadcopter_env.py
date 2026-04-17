@@ -272,6 +272,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._n_gates_passed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
 
         self._crashed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
+        self._backward_crossed = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
         # Motor dynamics
         self.cfg.thrust_to_weight = 3.15
@@ -676,8 +677,9 @@ class QuadcopterEnv(DirectRLEnv):
 
         cond_max_h = self._robot.data.root_link_pos_w[:, 2] > self.cfg.max_altitude
 
-        # self._crashed is computed in get_rewards() in quadcopter_strategies.py.
+        # self._crashed and self._backward_crossed are computed in get_rewards() in quadcopter_strategies.py.
         cond_crashed = self._crashed > 100
+        cond_backward = self._backward_crossed
 
         #TODO ----- START ----- [OPTIONAL]
         # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
@@ -688,6 +690,7 @@ class QuadcopterEnv(DirectRLEnv):
             cond_max_h
           | cond_h_min_time
           | cond_crashed
+          | cond_backward
         )
 
         # timeout conditions
