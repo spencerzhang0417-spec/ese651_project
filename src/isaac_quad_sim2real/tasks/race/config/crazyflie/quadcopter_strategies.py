@@ -70,6 +70,19 @@ class DefaultQuadcopterStrategy:
         self._prev_obs: Optional[torch.Tensor] = None
         self._obs_delay_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # --- Reset-state replay buffer (3-strategy reset) ---
+        # State layout (17): pos_w(3), quat_w(4), lin_vel_w(3), ang_vel_w(3), motor_speeds(4)
+        self._num_gates = self.env._waypoints.shape[0]
+        self._reset_buf_capacity = 4096
+        self._reset_buf = torch.zeros(
+            self._num_gates, self._reset_buf_capacity, 17, device=self.device
+        )
+        self._reset_buf_write_idx = torch.zeros(self._num_gates, dtype=torch.long, device=self.device)
+        self._reset_buf_filled = torch.zeros(self._num_gates, dtype=torch.bool, device=self.device)
+        # Balanced mix: 30% ground, 30% buffer replay, 40% geometric
+        self._p_ground = 0.30
+        self._p_buffer = 0.30
+
     def get_rewards(self) -> torch.Tensor:
         """Compute per-timestep rewards that encourage fast gate-to-gate racing."""
 
@@ -87,6 +100,29 @@ class DefaultQuadcopterStrategy:
 
         ids_gate_passed = torch.where(gate_passed > 0.5)[0]
         self.env._n_gates_passed[ids_gate_passed] += 1
+
+        # Capture post-crossing state into the per-gate replay buffer (before _idx_wp advances)
+        if self.cfg.is_train and ids_gate_passed.numel() > 0:
+            crossed_gate = self.env._idx_wp[ids_gate_passed].long()
+            state_vec = torch.cat([
+                self.env._robot.data.root_link_pos_w[ids_gate_passed],
+                self.env._robot.data.root_link_state_w[ids_gate_passed, 3:7],
+                self.env._robot.data.root_com_lin_vel_w[ids_gate_passed],
+                self.env._robot.data.root_ang_vel_w[ids_gate_passed],
+                self.env._motor_speeds[ids_gate_passed],
+            ], dim=-1)
+            for g in range(self._num_gates):
+                mask_g = (crossed_gate == g)
+                n_g = int(mask_g.sum().item())
+                if n_g == 0:
+                    continue
+                start = int(self._reset_buf_write_idx[g].item())
+                slots = (torch.arange(n_g, device=self.device) + start) % self._reset_buf_capacity
+                self._reset_buf[g, slots] = state_vec[mask_g]
+                if start + n_g >= self._reset_buf_capacity:
+                    self._reset_buf_filled[g] = True
+                self._reset_buf_write_idx[g] = (start + n_g) % self._reset_buf_capacity
+
         self.env._idx_wp[ids_gate_passed] = (self.env._idx_wp[ids_gate_passed] + 1) % self.env._waypoints.shape[0]
 
         self.env._desired_pos_w[ids_gate_passed, :2] = self.env._waypoints[self.env._idx_wp[ids_gate_passed], :2]
@@ -291,46 +327,104 @@ class DefaultQuadcopterStrategy:
         default_root_state = self.env._robot.data.default_root_state[env_ids]
 
         # TODO ----- START ----- Define the initial state during training after resetting an environment.
+        #
+        # Advanced reset with 3 strategies (p_ground=0.30, p_buffer=0.30, p_geom=0.40):
+        #   - ground:    drone on the floor in gate-0 frame (x∈[-3,-0.5], y∈[-1,1], z=0.1), zero velocity
+        #   - geometric: random gate, spawn behind it (x∈[-3,-0.5], y∈[-1,1], z=gate_z±0.5)
+        #   - buffer:    replay a stored post-crossing state (17-dim) + perturbations; target = next gate
+        # Buffer envs whose target gate's buffer isn't filled yet fall back to geometric.
 
-        num_gates = self.env._waypoints.shape[0]
+        if self.cfg.is_train:
+            num_gates = self._num_gates
 
-        # Randomly spawn behind any gate so the policy learns the full course
-        waypoint_indices = torch.randint(0, num_gates, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
+            # 1) Per-env strategy roll
+            roll = torch.rand(n_reset, device=self.device)
+            use_ground = roll < self._p_ground
+            use_buffer_intent = (roll >= self._p_ground) & (roll < self._p_ground + self._p_buffer)
 
-        x0_wp = self.env._waypoints[waypoint_indices, 0]
-        y0_wp = self.env._waypoints[waypoint_indices, 1]
-        z_wp = self.env._waypoints[waypoint_indices, 2]
-        theta = self.env._waypoints[waypoint_indices, -1]
+            # 2) Base gate for geometric / buffer sampling
+            idx_dtype = self.env._idx_wp.dtype
+            rand_gate = torch.randint(0, num_gates, (n_reset,), device=self.device, dtype=idx_dtype)
+            buf_ready = self._reset_buf_filled[rand_gate.long()]
+            use_buffer = use_buffer_intent & buf_ready   # intent + readiness
 
-        # Randomized offset behind the gate: 1–3m back, ±0.5m lateral, ±0.3m vertical
-        x_local = -torch.empty(n_reset, device=self.device).uniform_(1.0, 3.0)
-        y_local = torch.empty(n_reset, device=self.device).uniform_(-0.5, 0.5)
-        z_local = torch.empty(n_reset, device=self.device).uniform_(-0.3, 0.3)
+            # 3) Target gate the policy will aim at after spawn
+            #    ground → gate 0, geom → rand_gate, buffer → (rand_gate + 1) % num_gates
+            target_gate = rand_gate.clone()
+            target_gate = torch.where(use_ground, torch.zeros_like(target_gate), target_gate)
+            target_gate = torch.where(use_buffer, (rand_gate + 1) % num_gates, target_gate)
 
-        cos_theta = torch.cos(theta)
-        sin_theta = torch.sin(theta)
-        x_rot = cos_theta * x_local - sin_theta * y_local
-        y_rot = sin_theta * x_local + cos_theta * y_local
-        initial_x = x0_wp - x_rot
-        initial_y = y0_wp - y_rot
-        initial_z = (z_wp + z_local).clamp(min=0.3)
+            # ===== Compute geometric/ground spawn for all envs =====
+            # Ground spawns are expressed in gate 0's frame; geometric in rand_gate's frame.
+            geom_gate = torch.where(use_ground, torch.zeros_like(rand_gate), rand_gate)
+            x0_wp = self.env._waypoints[geom_gate, 0]
+            y0_wp = self.env._waypoints[geom_gate, 1]
+            z_wp = self.env._waypoints[geom_gate, 2]
+            theta = self.env._waypoints[geom_gate, -1]
 
-        default_root_state[:, 0] = initial_x
-        default_root_state[:, 1] = initial_y
-        default_root_state[:, 2] = initial_z
+            x_local = -torch.empty(n_reset, device=self.device).uniform_(0.5, 3.0)
+            y_local = torch.empty(n_reset, device=self.device).uniform_(-1.0, 1.0)
+            z_local = torch.empty(n_reset, device=self.device).uniform_(-0.5, 0.5)
 
-        # Point toward gate with randomized yaw perturbation
-        initial_yaw = torch.atan2(y0_wp - initial_y, x0_wp - initial_x)
-        yaw_noise = torch.empty(n_reset, device=self.device).uniform_(-0.3, 0.3)
-        quat = quat_from_euler_xyz(
-            torch.zeros(n_reset, device=self.device),
-            torch.zeros(n_reset, device=self.device),
-            initial_yaw + yaw_noise,
-        )
-        default_root_state[:, 3:7] = quat
+            cos_theta = torch.cos(theta)
+            sin_theta = torch.sin(theta)
+            x_rot = cos_theta * x_local - sin_theta * y_local
+            y_rot = sin_theta * x_local + cos_theta * y_local
+            pos_x = x0_wp - x_rot
+            pos_y = y0_wp - y_rot
+            pos_z = (z_wp + z_local).clamp(min=0.3)
+            # Ground: z fixed at 0.1 (matches paper's "z = 0.1")
+            pos_z = torch.where(use_ground, torch.full_like(pos_z, 0.1), pos_z)
 
-        # Small random initial velocity for robustness
-        default_root_state[:, 7:10] = torch.empty(n_reset, 3, device=self.device).uniform_(-0.5, 0.5)
+            initial_yaw = torch.atan2(y0_wp - pos_y, x0_wp - pos_x)
+            yaw_noise = torch.empty(n_reset, device=self.device).uniform_(-0.3, 0.3)
+            quat = quat_from_euler_xyz(
+                torch.zeros(n_reset, device=self.device),
+                torch.zeros(n_reset, device=self.device),
+                initial_yaw + yaw_noise,
+            )
+
+            default_root_state[:, 0] = pos_x
+            default_root_state[:, 1] = pos_y
+            default_root_state[:, 2] = pos_z
+            default_root_state[:, 3:7] = quat
+            lin_vel = torch.empty(n_reset, 3, device=self.device).uniform_(-0.5, 0.5)
+            lin_vel = torch.where(use_ground.unsqueeze(1), torch.zeros_like(lin_vel), lin_vel)
+            default_root_state[:, 7:10] = lin_vel
+            default_root_state[:, 10:13] = 0.0  # ang vel
+
+            # ===== Buffer-replay overrides =====
+            buf_local_ids = torch.where(use_buffer)[0]
+            if buf_local_ids.numel() > 0:
+                bgates = rand_gate[buf_local_ids].long()
+                slots = torch.randint(
+                    0, self._reset_buf_capacity, (buf_local_ids.numel(),), device=self.device
+                )
+                states = self._reset_buf[bgates, slots]  # (N, 17)
+                N = states.shape[0]
+
+                pos_pert = torch.empty(N, 3, device=self.device).uniform_(-0.1, 0.1)
+                lin_pert = torch.empty(N, 3, device=self.device).uniform_(-0.5, 0.5)
+                ang_pert = torch.empty(N, 3, device=self.device).uniform_(-0.3, 0.3)
+                motor_pert = torch.empty(N, 4, device=self.device).uniform_(0.95, 1.05)
+
+                b_pos = states[:, 0:3] + pos_pert
+                b_pos[:, 2] = b_pos[:, 2].clamp(min=0.1)
+                default_root_state[buf_local_ids, 0:3] = b_pos
+                default_root_state[buf_local_ids, 3:7] = states[:, 3:7]              # quat (no perturbation)
+                default_root_state[buf_local_ids, 7:10] = states[:, 7:10] + lin_pert
+                default_root_state[buf_local_ids, 10:13] = states[:, 10:13] + ang_pert
+
+                # Motor speeds (override the zero set earlier in this reset)
+                env_ids_buf = env_ids[buf_local_ids]
+                self.env._motor_speeds[env_ids_buf] = (states[:, 13:17] * motor_pert).clamp(
+                    self.env.cfg.motor_speed_min, self.env.cfg.motor_speed_max
+                )
+
+            waypoint_indices = target_gate
+        else:
+            # Play mode: the branch below overrides default_root_state and waypoint_indices.
+            waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
 
         # --- Domain randomization to bridge the sim2real gap ---
         twr_base = self.env._twr_value

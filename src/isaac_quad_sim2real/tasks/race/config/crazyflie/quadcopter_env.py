@@ -132,7 +132,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     track_name = 'powerloop'
 
     # env
-    episode_length_s = 30.0             # episode_length = episode_length_s / dt / decimation
+    episode_length_s = 45.0             # episode_length = episode_length_s / dt / decimation
     action_space = 4
     observation_space = 1 # inconsequential, just needs to exist for Gymnasium compatibility
     state_space = 0
@@ -193,7 +193,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
 
     # Reset variables
     min_altitude = 0.1
-    max_altitude = 3.0
+    max_altitude = 4.0
     max_time_on_ground = 1.5
 
     # motor dynamics
