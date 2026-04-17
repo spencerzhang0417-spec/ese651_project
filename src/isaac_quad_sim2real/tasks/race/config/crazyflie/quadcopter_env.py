@@ -128,7 +128,8 @@ class GateModelCfg:
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     use_wall = False
-    track_name = 'circle'
+    # track_name = 'circle'
+    track_name = 'powerloop'
 
     # env
     episode_length_s = 30.0             # episode_length = episode_length_s / dt / decimation
@@ -679,15 +680,17 @@ class QuadcopterEnv(DirectRLEnv):
         # self._crashed is computed in get_rewards() in quadcopter_strategies.py.
         cond_crashed = self._crashed > 100
 
-        #TODO ----- START ----- [OPTIONAL]
-        # Consider adding additional _get_dones() conditions to influence training. Note that the additional conditions
-        # will not be used during runtime for the official class race.
-        #TODO ----- END ----- [OPTIONAL]
+        # Backward gate crossing: terminate the episode (death-equivalent).
+        # _prev_x_drone_wrt_gate is updated inside get_rewards() each step.
+        x_gate = self._pose_drone_wrt_gate[:, 0]
+        yz_dist = torch.linalg.norm(self._pose_drone_wrt_gate[:, 1:], dim=1)
+        cond_backward_cross = (self._prev_x_drone_wrt_gate < 0) & (x_gate >= 0) & (yz_dist < 0.75)
 
         died = (
             cond_max_h
           | cond_h_min_time
           | cond_crashed
+          | cond_backward_cross
         )
 
         # timeout conditions

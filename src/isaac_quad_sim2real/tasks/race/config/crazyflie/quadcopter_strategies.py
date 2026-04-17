@@ -65,6 +65,11 @@ class DefaultQuadcopterStrategy:
         # Thrust to weight ratio
         self.env._thrust_to_weight[:] = self.env._twr_value
 
+        # --- Observation-delay DR state ---
+        self._obs_delay_prob = 0.3
+        self._prev_obs: Optional[torch.Tensor] = None
+        self._obs_delay_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
     def get_rewards(self) -> torch.Tensor:
         """Compute per-timestep rewards that encourage fast gate-to-gate racing."""
 
@@ -77,10 +82,6 @@ class DefaultQuadcopterStrategy:
         gate_crossed = (self.env._prev_x_drone_wrt_gate > 0) & (x_gate <= 0)
         close_to_center = yz_dist < 0.75
         gate_passed = (gate_crossed & close_to_center).float()
-
-        # backward gate passing penalty
-        backward_crossed = (self.env._prev_x_drone_wrt_gate < 0) & (x_gate >= 0) & (yz_dist < 0.75)
-        backward_penalty = backward_crossed.float()  # scale this in reward dict
 
         self.env._prev_x_drone_wrt_gate = x_gate.clone()
 
@@ -149,7 +150,6 @@ class DefaultQuadcopterStrategy:
                 # "gate_proximity": gate_proximity * self.env.rew['gate_proximity_reward_scale'],
                 "action_rate": action_rate * self.env.rew['action_rate_reward_scale'],
                 "time_penalty": torch.ones(self.num_envs, device=self.device) * self.env.rew['time_penalty_reward_scale'],
-                "backward_cross": backward_penalty * self.env.rew['backward_cross_reward_scale'],
                 "crash": crashed * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -207,7 +207,11 @@ class DefaultQuadcopterStrategy:
             ],
             dim=-1,
         )
-        observations = {"policy": obs}
+        if self._prev_obs is None:
+            self._prev_obs = torch.zeros_like(obs)
+        delayed_obs = torch.where(self._obs_delay_mask.unsqueeze(1), self._prev_obs, obs)
+        self._prev_obs = obs.clone()
+        observations = {"policy": delayed_obs}
 
         # Update yaw tracking
         rpy = euler_xyz_from_quat(quat_w)
@@ -272,6 +276,13 @@ class DefaultQuadcopterStrategy:
         self.env._previous_omega_err[env_ids] = 0.0
         self.env._omega_err_integral[env_ids] = 0.0
 
+        # Re-roll per-env observation latency and clear prev-obs for reset envs
+        self._obs_delay_mask[env_ids] = (
+            torch.rand(n_reset, device=self.device) < self._obs_delay_prob
+        )
+        if self._prev_obs is not None:
+            self._prev_obs[env_ids] = 0.0
+
         # Reset joints state
         joint_pos = self.env._robot.data.default_joint_pos[env_ids]
         joint_vel = self.env._robot.data.default_joint_vel[env_ids]
@@ -324,7 +335,7 @@ class DefaultQuadcopterStrategy:
         # --- Domain randomization to bridge the sim2real gap ---
         twr_base = self.env._twr_value
         self.env._thrust_to_weight[env_ids] = torch.empty(n_reset, device=self.device).uniform_(
-            twr_base * 0.95, twr_base * 1.05
+            twr_base * 0.85, twr_base * 1.15
         )
 
         k_xy = self.env._k_aero_xy_value
