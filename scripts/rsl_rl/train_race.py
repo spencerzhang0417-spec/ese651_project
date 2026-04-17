@@ -72,6 +72,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 
 # Import extensions to set up environment tasks
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 import src.isaac_quad_sim2real.tasks   # noqa: F401
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -114,8 +117,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # 'exit_speed_reward_scale': 3.0,
         # 'gate_proximity_reward_scale': 0.5,
         'action_rate_reward_scale': -0.1,
-        'time_penalty_reward_scale': -0.2,
-        'crash_reward_scale': -5.0,
+        'time_penalty_reward_scale': -0.1,
+        'crash_reward_scale': -15.0,
         'death_cost': -500.0,
         'backward_cross_reward_scale': -1000.0,
     }
