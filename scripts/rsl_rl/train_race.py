@@ -113,7 +113,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # 'exit_speed_reward_scale': 3.0,
         # 'gate_proximity_reward_scale': 0.5,
         'action_rate_reward_scale': 0.0,
-        'time_penalty_reward_scale': -0.05,
+        'time_penalty_reward_scale': -0.08,
         'crash_reward_scale': -5.0,
         'death_cost': -30.0,
     }

@@ -143,7 +143,11 @@ class DefaultQuadcopterStrategy:
         )
         delta_distance = self.env._last_distance_to_goal - distance_to_goal
         self.env._last_distance_to_goal = distance_to_goal.clone()
-        progress = torch.clamp(delta_distance, -1.0, 1.0)
+        # Gate-aware gating: only reward closing distance when on the correct approach side
+        # (x_gate > 0). Prevents the policy from being pulled backward through the current
+        # gate when the next target sits on the far side.
+        on_correct_side = (x_gate > 0).float()
+        progress = torch.clamp(delta_distance, -1.0, 1.0) * on_correct_side
 
         # # --- Speed toward current gate (split into approach and exit phases) ---
         # direction_to_gate = self.env._desired_pos_w - self.env._robot.data.root_link_pos_w
