@@ -9,6 +9,12 @@
 
 import sys
 import os
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+
 local_rsl_path = os.path.abspath("src/third_parties/rsl_rl_local")
 if os.path.exists(local_rsl_path):
     sys.path.insert(0, local_rsl_path)
@@ -54,6 +60,21 @@ if args_cli.video:
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+# Force PathTracing: RayTracedLighting is broken on RTX 50-series (Blackwell) in
+# Isaac Sim 4.5, affecting both video recording and the interactive viewport.
+# Fix is in Isaac Sim 5.0 (Isaac Lab 2.3+).
+import carb
+_settings = carb.settings.get_settings()
+_settings.set("/rtx/rendermode", "PathTracing")
+_settings.set("/rtx/pathtracing/optixDenoiser/enabled", True)
+_settings.set("/rtx/post/aa/op", 3)
+if args_cli.video:
+    _settings.set("/rtx/pathtracing/spp", 1)
+    _settings.set("/rtx/pathtracing/totalSpp", 64)
+else:
+    _settings.set("/rtx/pathtracing/spp", 1)
+    _settings.set("/rtx/pathtracing/totalSpp", 8)
 
 """Rest everything follows."""
 

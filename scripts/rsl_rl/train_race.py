@@ -10,6 +10,10 @@
 import sys
 import os
 
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 local_rsl_path = os.path.abspath("src/third_parties/rsl_rl_local")
 if os.path.exists(local_rsl_path):
     sys.path.insert(0, local_rsl_path)
@@ -47,6 +51,21 @@ sys.argv = [sys.argv[0]] + hydra_args
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+# Force PathTracing: RayTracedLighting is broken on RTX 50-series (Blackwell) in
+# Isaac Sim 4.5, affecting both video recording and the interactive viewport.
+# Fix is in Isaac Sim 5.0 (Isaac Lab 2.3+).
+import carb
+_settings = carb.settings.get_settings()
+_settings.set("/rtx/rendermode", "PathTracing")
+_settings.set("/rtx/pathtracing/optixDenoiser/enabled", True)
+_settings.set("/rtx/post/aa/op", 3)
+if args_cli.video:
+    _settings.set("/rtx/pathtracing/spp", 1)
+    _settings.set("/rtx/pathtracing/totalSpp", 64)
+else:
+    _settings.set("/rtx/pathtracing/spp", 1)
+    _settings.set("/rtx/pathtracing/totalSpp", 8)
 
 """Rest everything follows."""
 
@@ -107,13 +126,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TODO ----- START ----- Define rewards scales
     rewards = {
-        'progress_goal_reward_scale': 7.0,
+        'progress_goal_reward_scale': 7,
         'gate_passed_reward_scale': 10.0,
         # 'approach_speed_reward_scale': 4.0,
         # 'exit_speed_reward_scale': 3.0,
         # 'gate_proximity_reward_scale': 0.5,
         'action_rate_reward_scale': 0.0,
-        'time_penalty_reward_scale': -0.08,
+        'time_penalty_reward_scale': -0.15,
         'crash_reward_scale': -5.0,
         'death_cost': -30.0,
     }

@@ -204,6 +204,11 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     motor_speed_min = 0.0
     motor_speed_max = 2500.0
 
+    # Thrust-to-weight (nominal). DR samples uniformly in [twr*0.85, twr*1.15] per env.
+    # Real Crazyflie is observed to be much weaker than the old 3.15 default; lowered
+    # here and iterate: 2.8 -> 2.6 -> 2.4 to find the match.
+    thrust_to_weight = 2.8
+
     # PID parameters
     kp_omega_rp = 250.0
     ki_omega_rp = 500.0
@@ -274,8 +279,7 @@ class QuadcopterEnv(DirectRLEnv):
 
         self._crashed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
 
-        # Motor dynamics
-        self.cfg.thrust_to_weight = 3.15
+        # Motor dynamics — twr base is now a cfg field (QuadcopterEnvCfg.thrust_to_weight)
         r = self.cfg.arm_length * np.sqrt(2.0) / 2.0
         self._rotor_positions = torch.tensor(
             [
@@ -630,8 +634,15 @@ class QuadcopterEnv(DirectRLEnv):
     ##########################################################
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone().clamp(-1.0, 1.0)    # actions come directly from the NN
-        self._actions = self.cfg.beta * self._actions + (1 - self.cfg.beta) * self._previous_actions
+        raw_actions = actions.clone().clamp(-1.0, 1.0)
+        # Control-latency DR: for a random subset of envs, delay the command by one policy step.
+        if self.cfg.is_train and hasattr(self.strategy, "_action_delay_mask"):
+            if self.strategy._prev_action_cmd is None:
+                self.strategy._prev_action_cmd = torch.zeros_like(raw_actions)
+            delay_mask = self.strategy._action_delay_mask.unsqueeze(1)
+            raw_actions = torch.where(delay_mask, self.strategy._prev_action_cmd, raw_actions)
+            self.strategy._prev_action_cmd = raw_actions.clone()
+        self._actions = self.cfg.beta * raw_actions + (1 - self.cfg.beta) * self._previous_actions
 
         # Store current actions for next timestep (for action smoothing and observations)
         self._previous_actions = self._actions.clone()

@@ -70,6 +70,16 @@ class DefaultQuadcopterStrategy:
         self._prev_obs: Optional[torch.Tensor] = None
         self._obs_delay_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
+        # --- Observation noise (state-estimation DR) ---
+        # obs = [lin_vel(3), rot_mat(9), wp_curr_corners(12), wp_next_corners(12)] = 36 dim
+        obs_noise_std = [0.05] * 3 + [0.01] * 9 + [0.02] * 12 + [0.02] * 12
+        self._obs_noise_std = torch.tensor(obs_noise_std, device=self.device)
+
+        # --- Control latency DR state (policy action delay, 1 policy step = 20 ms) ---
+        self._action_delay_prob = 0.3
+        self._action_delay_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._prev_action_cmd: Optional[torch.Tensor] = None
+
         # --- Reset-state replay buffer (3-strategy reset) ---
         # State layout (17): pos_w(3), quat_w(4), lin_vel_w(3), ang_vel_w(3), motor_speeds(4)
         self._num_gates = self.env._waypoints.shape[0]
@@ -251,6 +261,9 @@ class DefaultQuadcopterStrategy:
             self._prev_obs = torch.zeros_like(obs)
         delayed_obs = torch.where(self._obs_delay_mask.unsqueeze(1), self._prev_obs, obs)
         self._prev_obs = obs.clone()
+        # Add state-estimation noise (mocap + filter jitter on the real drone)
+        if self.cfg.is_train:
+            delayed_obs = delayed_obs + torch.randn_like(delayed_obs) * self._obs_noise_std
         observations = {"policy": delayed_obs}
 
         # Update yaw tracking
@@ -322,6 +335,13 @@ class DefaultQuadcopterStrategy:
         )
         if self._prev_obs is not None:
             self._prev_obs[env_ids] = 0.0
+
+        # Re-roll per-env action-latency mask and clear prev-action
+        self._action_delay_mask[env_ids] = (
+            torch.rand(n_reset, device=self.device) < self._action_delay_prob
+        )
+        if self._prev_action_cmd is not None:
+            self._prev_action_cmd[env_ids] = 0.0
 
         # Reset joints state
         joint_pos = self.env._robot.data.default_joint_pos[env_ids]
@@ -431,6 +451,8 @@ class DefaultQuadcopterStrategy:
             waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
 
         # --- Domain randomization to bridge the sim2real gap ---
+        # TWR: +/-15% around the base (QuadcopterEnvCfg.thrust_to_weight). Iterate the base
+        # (2.8 -> 2.6 -> 2.4) to find the value matching the real Crazyflie.
         twr_base = self.env._twr_value
         self.env._thrust_to_weight[env_ids] = torch.empty(n_reset, device=self.device).uniform_(
             twr_base * 0.85, twr_base * 1.15
@@ -479,37 +501,38 @@ class DefaultQuadcopterStrategy:
 
         # Handle play mode initial position
         if not self.cfg.is_train:
-            # x_local and y_local are randomly sampled
-            x_local = torch.empty(1, device=self.device).uniform_(-3.0, -0.5)
-            y_local = torch.empty(1, device=self.device).uniform_(-1.0, 1.0)
+            # sample a per-env random offset so each trial starts somewhere different
+            x_local = torch.empty(n_reset, device=self.device).uniform_(-3.0, -0.5)
+            y_local = torch.empty(n_reset, device=self.device).uniform_(-1.0, 1.0)
 
             x0_wp = self.env._waypoints[self.env._initial_wp, 0]
             y0_wp = self.env._waypoints[self.env._initial_wp, 1]
             theta = self.env._waypoints[self.env._initial_wp, -1]
 
-            # rotate local pos to global frame
             cos_theta, sin_theta = torch.cos(theta), torch.sin(theta)
             x_rot = cos_theta * x_local - sin_theta * y_local
             y_rot = sin_theta * x_local + cos_theta * y_local
             x0 = x0_wp - x_rot
             y0 = y0_wp - y_rot
-            z0 = 0.05
+            z0 = torch.full((n_reset,), 0.05, device=self.device)
 
-            # point drone towards the zeroth gate
             yaw0 = torch.atan2(y0_wp - y0, x0_wp - x0)
 
-            default_root_state = self.env._robot.data.default_root_state[0].unsqueeze(0)
+            default_root_state = self.env._robot.data.default_root_state[env_ids].clone()
             default_root_state[:, 0] = x0
             default_root_state[:, 1] = y0
             default_root_state[:, 2] = z0
 
             quat = quat_from_euler_xyz(
-                torch.zeros(1, device=self.device),
-                torch.zeros(1, device=self.device),
-                yaw0
+                torch.zeros(n_reset, device=self.device),
+                torch.zeros(n_reset, device=self.device),
+                yaw0,
             )
             default_root_state[:, 3:7] = quat
-            waypoint_indices = self.env._initial_wp
+            default_root_state[:, 7:13] = 0.0
+            waypoint_indices = torch.full(
+                (n_reset,), int(self.env._initial_wp), device=self.device, dtype=self.env._idx_wp.dtype
+            )
 
         # Set waypoint indices and desired positions
         self.env._idx_wp[env_ids] = waypoint_indices
